@@ -1,5 +1,27 @@
 $(document).ready(function () {
   const isDebug = false;
+  
+  /*** Shared Worker 初始化 ***/
+  let mySharedWorker;
+  if (window.SharedWorker) {
+    // 假設你的 worker 檔案叫 worker.js
+    mySharedWorker = new SharedWorker('worker.js');
+    
+    // 啟動通訊埠
+    mySharedWorker.port.start();
+
+    // 監聽來自 Worker 的消息 (例如同步其他分頁的掃描狀態)
+    mySharedWorker.port.onmessage = function (e) {
+      console.log('來自 Shared Worker 的同步訊息:', e.data);
+      // 如果你想在所有分頁同步顯示 log，可以在這裡呼叫 view.addLogEntry
+      // view.addLogEntry(JSON.stringify({ SharedWorker: e.data }), "down");
+    };
+
+    console.log('Shared Worker 已連線');
+  } else {
+    console.warn('此瀏覽器不支援 Shared Worker');
+  }
+  
   /*** Events ***/
   // send scan command to server
   $("#scan").on("click", async function () {
@@ -14,6 +36,15 @@ $(document).ready(function () {
         });
         imageAction.updateTotal(data.length);
         imageAction.to(1);
+        // --- 新增：通知其他分頁掃描已完成 ---
+        if (mySharedWorker) {
+          mySharedWorker.port.postMessage({
+            type: 'SCAN_COMPLETED',
+            count: data.length,
+            time: new Date().toLocaleTimeString()
+          });
+        }
+        // ----------------------------------
       } else {
         console.log(error);
       }
