@@ -15,7 +15,7 @@ $(document).ready(function () {
       // 監聽來自 Worker 的同步訊息
       mySharedWorker.port.onmessage = function (e) {
         const { type, payload, activeConnections } = e.data;
-        console.log(`[SharedWorker] 收到類型: ${type}, 目前連線數: ${activeConnections}`);
+        console.log(`目前連線數: ${activeConnections}`);
         
         // 範例：如果其他分頁掃描完成了，本頁面也記錄一條 Log
         if (type === 'SCAN_COMPLETED') {
