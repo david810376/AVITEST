@@ -1,33 +1,24 @@
 $(document).ready(function () {
   const isDebug = false;
-  
 
- // --- 1. Shared Worker 初始化 ---
+  /*** Shared Worker 初始化 ***/
   let mySharedWorker;
   if (window.SharedWorker) {
-    try {
-      // 建立 worker 實例 (請確保目錄下有 worker.js)
-      mySharedWorker = new SharedWorker('worker.js');
-      
-      // 啟動通訊埠
-      mySharedWorker.port.start();
+    // 假設你的 worker 檔案叫 worker.js
+    mySharedWorker = new SharedWorker('worker.js');
+    
+    // 啟動通訊埠
+    mySharedWorker.port.start();
 
-      // 監聽來自 Worker 的同步訊息
-      mySharedWorker.port.onmessage = function (e) {
-        const { type, payload, activeConnections } = e.data;
-        console.log(`目前連線數: ${activeConnections}`);
-        
-        // 範例：如果其他分頁掃描完成了，本頁面也記錄一條 Log
-        if (type === 'SCAN_COMPLETED') {
-          view.addLogEntry(JSON.stringify({ 
-            info: "其他分頁已完成掃描", 
-            count: payload.count 
-          }), "down");
-        }
-      };
+    // 監聽來自 Worker 的消息 (例如同步其他分頁的掃描狀態)
+    mySharedWorker.port.onmessage = function (e) {
+      console.log('來自 Shared Worker 的同步訊息:', e.data);
+      // 如果你想在所有分頁同步顯示 log，可以在這裡呼叫 view.addLogEntry
+         view.addLogEntry(JSON.stringify({ SharedWorker: e.data }), "down");
+    };
 
     console.log('Shared Worker 已連線');
-
+    console.log(`[SharedWorker] 目前連線數: ${activeConnections}`);
   } else {
     console.warn('此瀏覽器不支援 Shared Worker');
   }
@@ -54,7 +45,6 @@ $(document).ready(function () {
             time: new Date().toLocaleTimeString()
           });
         }
-        // ----------------------------------
       } else {
         console.log(error);
       }
