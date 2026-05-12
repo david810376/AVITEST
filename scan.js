@@ -1015,7 +1015,7 @@ class WebFxScanServer {
 
       try {
         self.state.socket = new WebSocket(
-          "ws://" + ip + ":" + port + "/webscan2"
+          "wss://" + ip + ":" + port + "/webscan2"
         );
       } catch (e) {
         self.devLog("[ScanLib] connect() new WebSocket error:", e);
