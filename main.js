@@ -483,7 +483,7 @@ $(document).ready(function () {
       };
 
       // connect server
-      await MyScan.connect({ ip: "localhost, port: "17778", eventCallback });
+      await MyScan.connect({ ip: "localhost", port: "17778", eventCallback });
       await MyScan.setAutoScanCallback({
         callback: (file, errCode) => {
           if (errCode === 0) {
