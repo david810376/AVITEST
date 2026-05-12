@@ -18,7 +18,6 @@ $(document).ready(function () {
     };
 
     console.log('Shared Worker 已連線');
-    console.log(`[SharedWorker] 目前連線數: ${activeConnections}`);
   } else {
     console.warn('此瀏覽器不支援 Shared Worker');
   }
