@@ -2,7 +2,7 @@
   let requestId = 0;
   // Bump this query string when deploying worker/SDK fixes so Edge does not reuse a stale SharedWorker script.
   const SHARED_SCAN_WORKER_URL =
-    "shared-scan-worker.js?v=20260513-edge-sharedworker-7";
+    "shared-scan-worker.js?v=20260513-edge-sharedworker-8";
   const SHARED_SCAN_WORKER_NAME = "webfxscan-shared-worker";
   const DEBUG_LOG_LIMIT = 200;
 
@@ -81,6 +81,7 @@
           }
 
           if (error && error.error === 9007) {
+            forgetLocalNetworkAccess(ip, port);
             debugLog("shared-worker-connect-failed-no-fallback", {
               clientId: self._clientId,
               error,
@@ -370,10 +371,35 @@
       return Promise.resolve();
     }
 
+    return getLocalNetworkAccessPermissionState(client).then(function (state) {
+      if (state === "denied") {
+        throw {
+          result: false,
+          message:
+            "Edge has blocked Local Network Access for this site. Reset this site's local network permission, allow it again, and retry.",
+          error: 9007,
+          data: { localNetworkAccess: "denied" },
+        };
+      }
+
+      if (state === "granted" || hasRememberedLocalNetworkAccess(ip, port)) {
+        debugLog("lna:warmup-skip", {
+          clientId: client._clientId,
+          reason: state === "granted" ? "permission-granted" : "remembered",
+        });
+        return Promise.resolve();
+      }
+
+      return runLocalNetworkAccessWarmup(client, ip, port);
+    });
+  }
+
+  function runLocalNetworkAccessWarmup(client, ip, port) {
     const url = `https://${ip}:${port}/?lna=${Date.now()}`;
     const controller =
       typeof AbortController !== "undefined" ? new AbortController() : null;
     const timeoutMs = 30000;
+    const releaseDelayMs = 1500;
     const timeoutId = setTimeout(function () {
       if (controller) controller.abort();
     }, timeoutMs);
@@ -385,17 +411,22 @@
     });
 
     return fetch(url, {
-        mode: "no-cors",
-        cache: "no-store",
-        targetAddressSpace: "local",
-        signal: controller ? controller.signal : undefined,
-      })
+      mode: "no-cors",
+      cache: "no-store",
+      targetAddressSpace: "local",
+      signal: controller ? controller.signal : undefined,
+    })
       .then(function () {
         clearTimeout(timeoutId);
+        rememberLocalNetworkAccess(ip, port);
         debugLog("lna:warmup-ok", {
           clientId: client._clientId,
           url,
+          releaseDelayMs,
         });
+
+        // Give WebScan2 a moment to release the permission-check HTTP request before the worker opens WSS.
+        return delay(releaseDelayMs);
       })
       .catch(function (error) {
         clearTimeout(timeoutId);
@@ -417,6 +448,64 @@
           },
         };
       });
+  }
+
+  function getLocalNetworkAccessPermissionState(client) {
+    if (!global.navigator?.permissions?.query) {
+      return Promise.resolve("unknown");
+    }
+
+    return global.navigator.permissions
+      .query({ name: "local-network-access" })
+      .then(function (status) {
+        debugLog("lna:permission-state", {
+          clientId: client._clientId,
+          state: status.state,
+        });
+        return status.state || "unknown";
+      })
+      .catch(function (error) {
+        debugLog("lna:permission-query-unavailable", {
+          clientId: client._clientId,
+          message: error && error.message ? error.message : String(error),
+        });
+        return "unknown";
+      });
+  }
+
+  function getLocalNetworkAccessKey(ip, port) {
+    const origin = global.location ? global.location.origin : "unknown-origin";
+    return `webfxscan:lna:${origin}:${ip}:${port}`;
+  }
+
+  function hasRememberedLocalNetworkAccess(ip, port) {
+    try {
+      return global.localStorage?.getItem(getLocalNetworkAccessKey(ip, port)) === "ok";
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function rememberLocalNetworkAccess(ip, port) {
+    try {
+      global.localStorage?.setItem(getLocalNetworkAccessKey(ip, port), "ok");
+    } catch (error) {
+      // Ignore storage failures; permission probing can still run on the next load.
+    }
+  }
+
+  function forgetLocalNetworkAccess(ip, port) {
+    try {
+      global.localStorage?.removeItem(getLocalNetworkAccessKey(ip, port));
+    } catch (error) {
+      // Ignore storage failures.
+    }
+  }
+
+  function delay(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
   }
 
   function isLikelyLoopbackHost(host) {

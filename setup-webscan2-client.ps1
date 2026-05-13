@@ -1,7 +1,7 @@
 param(
   [string]$InstallDir = "C:\Program Files\Plustek\WebFXScan2",
   [string]$PfxPassword = "1234567",
-  [string]$RemoteOrigin = "https://avitest-seven.vercel.app",
+  [string]$RemoteOrigin = "https://avitest-iota.vercel.app",
   [switch]$SkipStart
 )
 
@@ -122,4 +122,4 @@ if (!$curl) {
 Write-Step "Done"
 Write-Host "Now open https://localhost:17778/ in the same browser used for the Vercel demo."
 Write-Host "Expected browser result: 501 Not Implemented."
-Write-Host "Then open https://avitest-seven.vercel.app/"
+Write-Host "Then open https://avitest-iota.vercel.app/"

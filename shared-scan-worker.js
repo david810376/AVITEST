@@ -1,8 +1,8 @@
 // Versioned import avoids stale SDK code when the hosted demo is redeployed.
-importScripts("scan.js?v=20260513-edge-sharedworker-7");
+importScripts("scan.js?v=20260513-edge-sharedworker-8");
 
 // The worker owns the only real WebFxScan instance for this browser origin.
-const WORKER_VERSION = "20260513-edge-sharedworker-7";
+const WORKER_VERSION = "20260513-edge-sharedworker-8";
 const workerId = createDebugId("worker");
 const scanInstance = new WebFxScan({ mode: "dev" });
 const ports = new Set();
