@@ -1,5 +1,5 @@
 // Versioned import avoids stale SDK code when the hosted demo is redeployed.
-importScripts("scan.js?v=20260513-edge-sharedworker-2");
+importScripts("scan.js?v=20260513-edge-sharedworker-3");
 
 // The worker owns the only real WebFxScan instance for this browser origin.
 const scanInstance = new WebFxScan({ mode: "dev" });
@@ -224,9 +224,23 @@ async function initOnce() {
     return initResult;
   }
 
-  initResult = await scanInstance.init();
-  initialized = true;
-  return initResult;
+  try {
+    initResult = await scanInstance.init();
+    initialized = true;
+    return initResult;
+  } catch (error) {
+    // WebScan2 can report 1014 when another tab already initialized the shared service.
+    if (isServerOccupiedError(error)) {
+      initialized = true;
+      initResult = successResponse({
+        alreadyInitialized: true,
+        originalError: getErrorCode(error),
+      });
+      return initResult;
+    }
+
+    throw error;
+  }
 }
 
 async function setScannerOnce(args = {}) {
@@ -245,17 +259,27 @@ async function setScannerOnce(args = {}) {
     return result;
   } catch (error) {
     // WebScan2 can return 1014 when the same scanner is already open.
-    if (error && error.error === 1014) {
+    if (isServerOccupiedError(error)) {
       scannerConfigKey = nextConfigKey;
       scannerConfigResult = successResponse({
         alreadyConfigured: true,
-        originalError: error.error,
+        originalError: getErrorCode(error),
       });
       return scannerConfigResult;
     }
 
     throw error;
   }
+}
+
+function isServerOccupiedError(error) {
+  // Normalize the SDK's busy/open-device error so init and setScanner can share handling.
+  return getErrorCode(error) === 1014;
+}
+
+function getErrorCode(error) {
+  if (!error || typeof error !== "object") return 0;
+  return error.error || error.errCode || error.code || 0;
 }
 
 function enableAutoScanCallback() {
