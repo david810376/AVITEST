@@ -2,7 +2,7 @@
   let requestId = 0;
   // Bump this query string when deploying worker/SDK fixes so Edge does not reuse a stale SharedWorker script.
   const SHARED_SCAN_WORKER_URL =
-    "shared-scan-worker.js?v=20260513-edge-sharedworker-6";
+    "shared-scan-worker.js?v=20260513-edge-sharedworker-7";
   const SHARED_SCAN_WORKER_NAME = "webfxscan-shared-worker";
   const DEBUG_LOG_LIMIT = 200;
 
@@ -67,7 +67,7 @@
       return this._directClient.connect(props);
     }
 
-    return ensureLocalNetworkAccess(ip, port)
+    return ensureLocalNetworkAccess(self, ip, port)
       .then(function () {
         // Build the SharedWorker only after Edge/Chrome has had a chance to grant localhost access.
         return ensureWorker(self);
@@ -358,7 +358,7 @@
     return new URLSearchParams(global.location.search).get("directFallback") === "1";
   }
 
-  function ensureLocalNetworkAccess(ip, port) {
+  function ensureLocalNetworkAccess(client, ip, port) {
     // Chrome's Local Network Access prompt must be triggered from the page.
     // SharedWorker local requests can fail if the site has not been granted permission yet.
     if (typeof global.fetch !== "function" || !isLikelyLoopbackHost(ip)) {
@@ -371,21 +371,52 @@
     }
 
     const url = `https://${ip}:${port}/?lna=${Date.now()}`;
-    return Promise.race([
-      fetch(url, {
+    const controller =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeoutMs = 30000;
+    const timeoutId = setTimeout(function () {
+      if (controller) controller.abort();
+    }, timeoutMs);
+
+    debugLog("lna:warmup-start", {
+      clientId: client._clientId,
+      url,
+      timeoutMs,
+    });
+
+    return fetch(url, {
         mode: "no-cors",
         cache: "no-store",
         targetAddressSpace: "local",
-      }),
-      new Promise(function (resolve) {
-        setTimeout(resolve, 3000);
-      }),
-    ]).catch(function (error) {
-      console.warn(
-        "[SharedScanClient] Local Network Access warm-up failed; SharedWorker connect will report the final SDK error.",
-        error
-      );
-    });
+        signal: controller ? controller.signal : undefined,
+      })
+      .then(function () {
+        clearTimeout(timeoutId);
+        debugLog("lna:warmup-ok", {
+          clientId: client._clientId,
+          url,
+        });
+      })
+      .catch(function (error) {
+        clearTimeout(timeoutId);
+        const isTimeout = error && error.name === "AbortError";
+        debugLog(isTimeout ? "lna:warmup-timeout" : "lna:warmup-error", {
+          clientId: client._clientId,
+          url,
+          message: error && error.message ? error.message : String(error),
+        });
+
+        throw {
+          result: false,
+          message: isTimeout
+            ? "Local Network Access permission was not granted within 30 seconds. Please allow this site to access localhost and try again."
+            : "Local Network Access warm-up failed. Please open https://localhost:17778/ in this Edge profile, trust the certificate, allow local network access, and try again.",
+          error: 9007,
+          data: {
+            localNetworkAccess: isTimeout ? "timeout" : "failed",
+          },
+        };
+      });
   }
 
   function isLikelyLoopbackHost(host) {
