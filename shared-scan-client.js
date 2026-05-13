@@ -2,7 +2,7 @@
   let requestId = 0;
   // Bump this query string when deploying worker/SDK fixes so Edge does not reuse a stale SharedWorker script.
   const SHARED_SCAN_WORKER_URL =
-    "shared-scan-worker.js?v=20260513-edge-sharedworker-8";
+    "shared-scan-worker.js?v=20260513-edge-sharedworker-9";
   const SHARED_SCAN_WORKER_NAME = "webfxscan-shared-worker";
   const DEBUG_LOG_LIMIT = 200;
 
@@ -24,6 +24,7 @@
     this._worker = null;
     this._port = null;
     this._workerReady = null;
+    this._workerState = null;
 
     debugLog("client:create", {
       clientId: this._clientId,
@@ -67,10 +68,18 @@
       return this._directClient.connect(props);
     }
 
-    return ensureLocalNetworkAccess(self, ip, port)
+    return ensureWorker(self)
       .then(function () {
-        // Build the SharedWorker only after Edge/Chrome has had a chance to grant localhost access.
-        return ensureWorker(self);
+        // If another tab already opened the shared socket, do not touch WebScan2 from this page.
+        if (canReuseWorkerSocket(self._workerState)) {
+          debugLog("connect:skip-lna-shared-socket-open", {
+            clientId: self._clientId,
+            workerState: self._workerState,
+          });
+          return null;
+        }
+
+        return ensureLocalNetworkAccess(self, ip, port);
       })
       .then(function () {
         return request(self, "connect", { ip, port }).catch(function (error) {
@@ -288,6 +297,7 @@
 
         client._port.onmessage = function (event) {
           if (event.data && event.data.type === "ready") {
+            client._workerState = event.data.data || {};
             debugLog("worker:ready", event.data.data || {});
             settleOk();
             return;
@@ -382,12 +392,12 @@
         };
       }
 
-      if (state === "granted" || hasRememberedLocalNetworkAccess(ip, port)) {
-        debugLog("lna:warmup-skip", {
+      if (state === "granted") {
+        debugLog("lna:fetch-skip", {
           clientId: client._clientId,
-          reason: state === "granted" ? "permission-granted" : "remembered",
+          reason: "permission-granted",
         });
-        return Promise.resolve();
+        return runPageWebSocketPreflight(client, ip, port);
       }
 
       return runLocalNetworkAccessWarmup(client, ip, port);
@@ -399,7 +409,7 @@
     const controller =
       typeof AbortController !== "undefined" ? new AbortController() : null;
     const timeoutMs = 30000;
-    const releaseDelayMs = 1500;
+    const releaseDelayMs = 2500;
     const timeoutId = setTimeout(function () {
       if (controller) controller.abort();
     }, timeoutMs);
@@ -418,15 +428,12 @@
     })
       .then(function () {
         clearTimeout(timeoutId);
-        rememberLocalNetworkAccess(ip, port);
         debugLog("lna:warmup-ok", {
           clientId: client._clientId,
           url,
-          releaseDelayMs,
         });
 
-        // Give WebScan2 a moment to release the permission-check HTTP request before the worker opens WSS.
-        return delay(releaseDelayMs);
+        return runPageWebSocketPreflight(client, ip, port, releaseDelayMs);
       })
       .catch(function (error) {
         clearTimeout(timeoutId);
@@ -448,6 +455,100 @@
           },
         };
       });
+  }
+
+  function runPageWebSocketPreflight(client, ip, port, releaseDelayMs = 2500) {
+    const url = `wss://${ip}:${port}/webscan2`;
+    const timeoutMs = 10000;
+
+    debugLog("lna:websocket-preflight-start", {
+      clientId: client._clientId,
+      url,
+      timeoutMs,
+    });
+
+    return new Promise(function (resolve, reject) {
+      let settled = false;
+      let socket = null;
+      const timeoutId = setTimeout(function () {
+        settle(false, {
+          result: false,
+          message:
+            "Page WebSocket preflight timed out before SharedWorker connect.",
+          error: 9007,
+          data: { pageWebSocketPreflight: "timeout" },
+        });
+      }, timeoutMs);
+
+      function settle(ok, value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        try {
+          if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+        } catch (error) {
+          // Ignore preflight close failures.
+        }
+
+        if (ok) {
+          delay(releaseDelayMs).then(resolve);
+        } else {
+          reject(value);
+        }
+      }
+
+      try {
+        socket = new WebSocket(url);
+      } catch (error) {
+        debugLog("lna:websocket-preflight-create-error", {
+          clientId: client._clientId,
+          url,
+          message: error.message || String(error),
+        });
+        settle(false, {
+          result: false,
+          message: error.message || "Page WebSocket preflight failed.",
+          error: 9007,
+          data: { pageWebSocketPreflight: "create-error" },
+        });
+        return;
+      }
+
+      socket.onopen = function () {
+        debugLog("lna:websocket-preflight-open", {
+          clientId: client._clientId,
+          url,
+          releaseDelayMs,
+        });
+        socket.close();
+      };
+
+      socket.onclose = function (event) {
+        debugLog("lna:websocket-preflight-close", {
+          clientId: client._clientId,
+          url,
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean,
+          releaseDelayMs,
+        });
+        settle(true);
+      };
+
+      socket.onerror = function () {
+        debugLog("lna:websocket-preflight-error", {
+          clientId: client._clientId,
+          url,
+        });
+        settle(false, {
+          result: false,
+          message:
+            "Page WebSocket preflight failed. Confirm Edge can open wss://localhost:17778/webscan2 from this site.",
+          error: 9007,
+          data: { pageWebSocketPreflight: "error" },
+        });
+      };
+    });
   }
 
   function getLocalNetworkAccessPermissionState(client) {
@@ -473,33 +574,8 @@
       });
   }
 
-  function getLocalNetworkAccessKey(ip, port) {
-    const origin = global.location ? global.location.origin : "unknown-origin";
-    return `webfxscan:lna:${origin}:${ip}:${port}`;
-  }
-
-  function hasRememberedLocalNetworkAccess(ip, port) {
-    try {
-      return global.localStorage?.getItem(getLocalNetworkAccessKey(ip, port)) === "ok";
-    } catch (error) {
-      return false;
-    }
-  }
-
-  function rememberLocalNetworkAccess(ip, port) {
-    try {
-      global.localStorage?.setItem(getLocalNetworkAccessKey(ip, port), "ok");
-    } catch (error) {
-      // Ignore storage failures; permission probing can still run on the next load.
-    }
-  }
-
   function forgetLocalNetworkAccess(ip, port) {
-    try {
-      global.localStorage?.removeItem(getLocalNetworkAccessKey(ip, port));
-    } catch (error) {
-      // Ignore storage failures.
-    }
+    debugLog("lna:forget", { ip, port });
   }
 
   function delay(ms) {
@@ -521,6 +597,9 @@
     if (!message || typeof message !== "object") return;
 
     if (message.type === "debug") {
+      if (message.data && typeof message.data === "object") {
+        client._workerState = message.data;
+      }
       debugLog("worker:" + message.event, message.data || {});
       return;
     }
@@ -614,6 +693,14 @@
       client._pendingRequests[id].reject(error);
       delete client._pendingRequests[id];
     });
+  }
+
+  function canReuseWorkerSocket(workerState) {
+    return (
+      workerState &&
+      (workerState.socketReadyState === "OPEN" ||
+        workerState.connectState === "connected")
+    );
   }
 
   function stripFunctions(value) {
