@@ -2,8 +2,9 @@
   let requestId = 0;
   // Bump this query string when deploying worker/SDK fixes so Edge does not reuse a stale SharedWorker script.
   const SHARED_SCAN_WORKER_URL =
-    "shared-scan-worker.js?v=20260513-edge-sharedworker-3";
+    "shared-scan-worker.js?v=20260513-edge-sharedworker-6";
   const SHARED_SCAN_WORKER_NAME = "webfxscan-shared-worker";
+  const DEBUG_LOG_LIMIT = 200;
 
   // Page-side proxy for the SharedWorker-owned WebFxScan instance.
   function WebFxScanSharedClient(props) {
@@ -17,17 +18,24 @@
     this._props = props || {};
     this._directClient = null;
     this._pendingRequests = {};
+    this._clientId = createDebugId("tab");
 
     // Create the worker lazily after the page has requested Local Network Access.
     this._worker = null;
     this._port = null;
     this._workerReady = null;
 
+    debugLog("client:create", {
+      clientId: this._clientId,
+      href: global.location ? global.location.href : "",
+    });
+
     const disconnectPort = function () {
       try {
         if (!self._port) return;
         // Tell the worker this tab should no longer receive broadcast events.
-        self._port.postMessage({ type: "disconnect" });
+        self._port.postMessage({ type: "disconnect", clientId: self._clientId });
+        debugLog("client:disconnect", { clientId: self._clientId });
       } catch (error) {
         // Ignore unload-time delivery failures.
       }
@@ -68,8 +76,15 @@
         return request(self, "connect", { ip, port }).catch(function (error) {
           // Some Chromium builds allow page WebSockets to localhost but reject
           // the same localhost WSS connection when it originates in a SharedWorker.
-          if (error && error.error === 9007) {
+          if (error && error.error === 9007 && isDirectFallbackAllowed()) {
             return switchToDirectClient(self, props, error);
+          }
+
+          if (error && error.error === 9007) {
+            debugLog("shared-worker-connect-failed-no-fallback", {
+              clientId: self._clientId,
+              error,
+            });
           }
 
           throw error;
@@ -200,16 +215,29 @@
       return new Promise(function (resolve, reject) {
         // Match worker responses back to the original SDK-like Promise.
         client._pendingRequests[id] = { resolve, reject };
+        debugLog("request:send", {
+          clientId: client._clientId,
+          id,
+          method,
+          args: summarizeForLog(args || {}),
+        });
 
         try {
           client._port.postMessage({
             type: "request",
             id,
             method,
+            clientId: client._clientId,
             args: stripFunctions(args || {}),
           });
         } catch (error) {
           delete client._pendingRequests[id];
+          debugLog("request:postMessage-error", {
+            clientId: client._clientId,
+            id,
+            method,
+            message: error.message || String(error),
+          });
           reject({
             result: false,
             message: error.message || "Failed to post request to SharedWorker.",
@@ -259,6 +287,7 @@
 
         client._port.onmessage = function (event) {
           if (event.data && event.data.type === "ready") {
+            debugLog("worker:ready", event.data.data || {});
             settleOk();
             return;
           }
@@ -287,6 +316,8 @@
         client._port.start();
         client._port.postMessage({
           type: "client-ready",
+          clientId: client._clientId,
+          href: global.location ? global.location.href : "",
           // Strip functions before crossing the worker boundary.
           props: stripFunctions(client._props || {}),
         });
@@ -312,13 +343,19 @@
 
   function switchToDirectClient(client, connectProps, originalError) {
     console.warn(
-      "[SharedScanClient] SharedWorker WSS connect failed with 9007; falling back to page WebSocket.",
+      "[SharedScanClient] SharedWorker WSS connect failed with 9007; falling back to page WebSocket because directFallback=1 is set.",
       originalError
     );
 
     client._directClient = new WebFxScan(client._props);
     global.__webfxScanTransport = "direct-fallback";
     return client._directClient.connect(connectProps);
+  }
+
+  function isDirectFallbackAllowed() {
+    // Keep fallback opt-in only; otherwise 1014 can look like a SharedWorker issue when it is direct mode.
+    if (!global.location || !global.location.search) return false;
+    return new URLSearchParams(global.location.search).get("directFallback") === "1";
   }
 
   function ensureLocalNetworkAccess(ip, port) {
@@ -363,6 +400,11 @@
   function handleWorkerMessage(client, message) {
     if (!message || typeof message !== "object") return;
 
+    if (message.type === "debug") {
+      debugLog("worker:" + message.event, message.data || {});
+      return;
+    }
+
     if (message.type === "response") {
       // Resolve or reject the Promise created by request().
       const pending = client._pendingRequests[message.id];
@@ -371,8 +413,20 @@
       delete client._pendingRequests[message.id];
 
       if (message.ok) {
+        debugLog("response:ok", {
+          clientId: client._clientId,
+          id: message.id,
+          method: message.method || "",
+          result: summarizeForLog(message.result || {}),
+        });
         pending.resolve(message.result);
       } else {
+        debugLog("response:error", {
+          clientId: client._clientId,
+          id: message.id,
+          method: message.method || "",
+          error: message.error || {},
+        });
         pending.reject(message.error);
       }
       return;
@@ -458,8 +512,55 @@
     return result;
   }
 
+  function createDebugId(prefix) {
+    return `${prefix}-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+  }
+
+  function debugLog(eventName, data) {
+    // Keep a small page-side log so support can copy it from DevTools.
+    const entry = {
+      time: new Date().toISOString(),
+      event: eventName,
+      data: data || {},
+    };
+
+    global.__webfxScanDebug = global.__webfxScanDebug || [];
+    global.__webfxScanDebug.push(entry);
+    if (global.__webfxScanDebug.length > DEBUG_LOG_LIMIT) {
+      global.__webfxScanDebug.shift();
+    }
+
+    if (global.console && typeof global.console.log === "function") {
+      global.console.log("[SharedScanClient]", eventName, data || {});
+    }
+  }
+
+  function summarizeForLog(value) {
+    // Avoid logging scanned image/base64 payloads while still showing which API/config was used.
+    if (value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return { type: "array", length: value.length };
+
+    const result = {};
+    Object.keys(value).forEach(function (key) {
+      const currentValue = value[key];
+      if (key.toLowerCase().includes("base64")) {
+        result[key] = "[base64 omitted]";
+      } else if (typeof currentValue === "string" && currentValue.length > 120) {
+        result[key] = currentValue.slice(0, 120) + "...";
+      } else if (currentValue && typeof currentValue === "object") {
+        result[key] = summarizeForLog(currentValue);
+      } else {
+        result[key] = currentValue;
+      }
+    });
+    return result;
+  }
+
   global.WebFxScanSharedClient = WebFxScanSharedClient;
   global.createWebFxScanClient = function (props) {
+    global.__webfxScanDebug = global.__webfxScanDebug || [];
     // SharedWorker requires a real origin; file:// would create unsafe fallback behavior.
     if (global.location && global.location.protocol === "file:") {
       throwSharedWorkerSetupError(
