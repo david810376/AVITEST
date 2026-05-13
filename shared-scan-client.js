@@ -1,5 +1,9 @@
 (function (global) {
   let requestId = 0;
+  // Bump this query string when deploying worker/SDK fixes so Edge does not reuse a stale SharedWorker script.
+  const SHARED_SCAN_WORKER_URL =
+    "shared-scan-worker.js?v=20260513-edge-sharedworker-2";
+  const SHARED_SCAN_WORKER_NAME = "webfxscan-shared-worker";
 
   // Page-side proxy for the SharedWorker-owned WebFxScan instance.
   function WebFxScanSharedClient(props) {
@@ -10,45 +14,32 @@
     const self = this;
     // Functions cannot be sent through postMessage, so callbacks stay on the page.
     this._callbacks = {};
+    this._props = props || {};
+    this._directClient = null;
     this._pendingRequests = {};
 
-    // One SharedWorker instance is shared by tabs with the same browser profile and origin.
-    this._worker = new SharedWorker(
-      "shared-scan-worker.js",
-      "webfxscan-shared-worker"
-    );
-    this._port = this._worker.port;
+    // Create the worker lazily after the page has requested Local Network Access.
+    this._worker = null;
+    this._port = null;
+    this._workerReady = null;
 
-    this._port.onmessage = function (event) {
-      handleWorkerMessage(self, event.data);
-    };
-
-    this._worker.onerror = function (event) {
-      rejectAllPending(self, {
-        result: false,
-        message: event.message || "SharedWorker error.",
-        error: 9999,
-      });
-    };
-
-    this._port.start();
-    this._port.postMessage({
-      type: "client-ready",
-      // Strip functions before crossing the worker boundary.
-      props: stripFunctions(props || {}),
-    });
-
-    global.addEventListener("beforeunload", function () {
+    const disconnectPort = function () {
       try {
+        if (!self._port) return;
         // Tell the worker this tab should no longer receive broadcast events.
         self._port.postMessage({ type: "disconnect" });
       } catch (error) {
         // Ignore unload-time delivery failures.
       }
-    });
+    };
+
+    // pagehide covers tab close, reload, and navigation in Chromium more reliably than beforeunload alone.
+    global.addEventListener("pagehide", disconnectPort);
+    global.addEventListener("beforeunload", disconnectPort);
   }
 
   WebFxScanSharedClient.prototype.connect = function (props) {
+    const self = this;
     const {
       ip = "localhost",
       port = "17778",
@@ -64,26 +55,50 @@
     this._callbacks.eventCallback = eventCallback;
     this._callbacks.ipExceptionCallback = ipExceptionCallback;
 
-    return request(this, "connect", { ip, port });
+    if (this._directClient) {
+      return this._directClient.connect(props);
+    }
+
+    return ensureLocalNetworkAccess(ip, port)
+      .then(function () {
+        // Build the SharedWorker only after Edge/Chrome has had a chance to grant localhost access.
+        return ensureWorker(self);
+      })
+      .then(function () {
+        return request(self, "connect", { ip, port }).catch(function (error) {
+          // Some Chromium builds allow page WebSockets to localhost but reject
+          // the same localhost WSS connection when it originates in a SharedWorker.
+          if (error && error.error === 9007) {
+            return switchToDirectClient(self, props, error);
+          }
+
+          throw error;
+        });
+      });
   };
 
   WebFxScanSharedClient.prototype.close = function () {
+    if (this._directClient) return this._directClient.close();
     return request(this, "close");
   };
 
   WebFxScanSharedClient.prototype.init = function () {
+    if (this._directClient) return this._directClient.init();
     return request(this, "init");
   };
 
   WebFxScanSharedClient.prototype.getDeviceList = function () {
+    if (this._directClient) return this._directClient.getDeviceList();
     return request(this, "getDeviceList");
   };
 
   WebFxScanSharedClient.prototype.getFileList = function () {
+    if (this._directClient) return this._directClient.getFileList();
     return request(this, "getFileList");
   };
 
   WebFxScanSharedClient.prototype.setScanner = function (props) {
+    if (this._directClient) return this._directClient.setScanner(props || {});
     return request(this, "setScanner", props || {});
   };
 
@@ -91,6 +106,7 @@
     const { callback = function () {} } = props || {};
     // The worker broadcasts auto-scan events; this tab invokes its own UI callback.
     this._callbacks.autoScanCallback = callback;
+    if (this._directClient) return this._directClient.setAutoScanCallback(props || {});
     return request(this, "setAutoScanCallback");
   };
 
@@ -98,6 +114,7 @@
     const { callback = function () {} } = props || {};
     // Keep the UI loading-mask callback on the page.
     this._callbacks.beforeAutoScanCallback = callback;
+    if (this._directClient) return this._directClient.setBeforeAutoScanCallback(props || {});
     return request(this, "setBeforeAutoScanCallback");
   };
 
@@ -118,34 +135,43 @@
       this._callbacks.scanEventCallback = eventCallback;
     }
 
+    if (this._directClient) return this._directClient.scan(props || {});
     return request(this, "scan", { timeout, hideBase64 });
   };
 
   WebFxScanSharedClient.prototype.convert = function (props) {
+    if (this._directClient) return this._directClient.convert(props || {});
     return request(this, "convert", props || {});
   };
 
   WebFxScanSharedClient.prototype.exportPdf = function (filelist) {
+    if (this._directClient) return this._directClient.exportPdf(filelist);
     return request(this, "exportPdf", { filelist });
   };
 
   WebFxScanSharedClient.prototype.rotate = function (props) {
+    if (this._directClient) return this._directClient.rotate(props || {});
     return request(this, "rotate", props || {});
   };
 
   WebFxScanSharedClient.prototype.deleteAll = function () {
+    if (this._directClient) return this._directClient.deleteAll();
     return request(this, "deleteAll");
   };
 
   WebFxScanSharedClient.prototype.deleteFile = function (filename) {
+    if (this._directClient) return this._directClient.deleteFile(filename);
     return request(this, "deleteFile", { filename });
   };
 
   WebFxScanSharedClient.prototype.getVersion = function () {
-    return request(this, "getVersion");
+    if (this._directClient) return this._directClient.getVersion();
+    // Read the static SDK version in the page so version display does not create the worker too early.
+    return new WebFxScan(this._props).getVersion();
   };
 
   WebFxScanSharedClient.prototype.calibrate = function () {
+    if (this._directClient) return this._directClient.calibrate();
     return request(this, "calibrate");
   };
 
@@ -153,30 +179,185 @@
     const { callback = function () {} } = props || {};
     // Log collection stays page-local while socket traffic is observed in the worker.
     this._callbacks.socketMsgCollector = callback;
+    if (this._directClient) return this._directClient.setSocketMsgCollector(props || {});
     return request(this, "setSocketMsgCollector");
   };
 
   WebFxScanSharedClient.prototype.ejectPaper = function (props) {
+    if (this._directClient) return this._directClient.ejectPaper(props || {});
     return request(this, "ejectPaper", props || {});
   };
 
   WebFxScanSharedClient.prototype.getPaperStatus = function () {
+    if (this._directClient) return this._directClient.getPaperStatus();
     return request(this, "getPaperStatus");
   };
 
   function request(client, method, args) {
     const id = ++requestId;
 
-    return new Promise(function (resolve, reject) {
-      // Match worker responses back to the original SDK-like Promise.
-      client._pendingRequests[id] = { resolve, reject };
-      client._port.postMessage({
-        type: "request",
-        id,
-        method,
-        args: stripFunctions(args || {}),
+    return ensureWorker(client).then(function () {
+      return new Promise(function (resolve, reject) {
+        // Match worker responses back to the original SDK-like Promise.
+        client._pendingRequests[id] = { resolve, reject };
+
+        try {
+          client._port.postMessage({
+            type: "request",
+            id,
+            method,
+            args: stripFunctions(args || {}),
+          });
+        } catch (error) {
+          delete client._pendingRequests[id];
+          reject({
+            result: false,
+            message: error.message || "Failed to post request to SharedWorker.",
+            error: 9999,
+          });
+        }
       });
     });
+  }
+
+  function ensureWorker(client) {
+    if (client._port) {
+      return client._workerReady || Promise.resolve(client._port);
+    }
+
+    if (client._workerReady) {
+      return client._workerReady;
+    }
+
+    client._workerReady = new Promise(function (resolve, reject) {
+      let settled = false;
+      let readyTimer = null;
+
+      const settleOk = function () {
+        if (settled) return;
+        settled = true;
+        clearTimeout(readyTimer);
+        global.__webfxScanTransport = "shared-worker";
+        resolve(client._port);
+      };
+
+      const settleError = function (error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(readyTimer);
+        client._workerReady = null;
+        reject(error);
+      };
+
+      try {
+        // One SharedWorker instance is shared by tabs with the same browser profile, origin, name, and URL.
+        client._worker = new SharedWorker(
+          SHARED_SCAN_WORKER_URL,
+          SHARED_SCAN_WORKER_NAME
+        );
+        client._port = client._worker.port;
+
+        client._port.onmessage = function (event) {
+          if (event.data && event.data.type === "ready") {
+            settleOk();
+            return;
+          }
+
+          handleWorkerMessage(client, event.data);
+        };
+
+        client._port.onmessageerror = function (event) {
+          console.warn("[SharedScanClient] Worker message clone failed:", event);
+        };
+
+        client._worker.onerror = function (event) {
+          const error = {
+            result: false,
+            message: event.message || "SharedWorker error.",
+            error: 9999,
+          };
+
+          rejectAllPending(client, error);
+          client._worker = null;
+          client._port = null;
+          client._workerReady = null;
+          settleError(error);
+        };
+
+        client._port.start();
+        client._port.postMessage({
+          type: "client-ready",
+          // Strip functions before crossing the worker boundary.
+          props: stripFunctions(client._props || {}),
+        });
+
+        readyTimer = setTimeout(function () {
+          // Older cached workers may not send a ready message; continue so the real request can report the SDK error.
+          settleOk();
+        }, 1500);
+      } catch (error) {
+        client._worker = null;
+        client._port = null;
+        client._workerReady = null;
+        settleError({
+          result: false,
+          message: error.message || "Failed to create SharedWorker.",
+          error: 9999,
+        });
+      }
+    });
+
+    return client._workerReady;
+  }
+
+  function switchToDirectClient(client, connectProps, originalError) {
+    console.warn(
+      "[SharedScanClient] SharedWorker WSS connect failed with 9007; falling back to page WebSocket.",
+      originalError
+    );
+
+    client._directClient = new WebFxScan(client._props);
+    global.__webfxScanTransport = "direct-fallback";
+    return client._directClient.connect(connectProps);
+  }
+
+  function ensureLocalNetworkAccess(ip, port) {
+    // Chrome's Local Network Access prompt must be triggered from the page.
+    // SharedWorker local requests can fail if the site has not been granted permission yet.
+    if (typeof global.fetch !== "function" || !isLikelyLoopbackHost(ip)) {
+      return Promise.resolve();
+    }
+
+    const protocol = global.location ? global.location.protocol : "";
+    if (protocol !== "https:") {
+      return Promise.resolve();
+    }
+
+    const url = `https://${ip}:${port}/?lna=${Date.now()}`;
+    return Promise.race([
+      fetch(url, {
+        mode: "no-cors",
+        cache: "no-store",
+        targetAddressSpace: "local",
+      }),
+      new Promise(function (resolve) {
+        setTimeout(resolve, 3000);
+      }),
+    ]).catch(function (error) {
+      console.warn(
+        "[SharedScanClient] Local Network Access warm-up failed; SharedWorker connect will report the final SDK error.",
+        error
+      );
+    });
+  }
+
+  function isLikelyLoopbackHost(host) {
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "[::1]"
+    );
   }
 
   function handleWorkerMessage(client, message) {
@@ -296,7 +477,7 @@
     try {
       const client = new WebFxScanSharedClient(props);
       // Debug flag for checking the active transport from DevTools.
-      global.__webfxScanTransport = "shared-worker";
+      global.__webfxScanTransport = "shared-worker-pending";
       return client;
     } catch (error) {
       throwSharedWorkerSetupError(

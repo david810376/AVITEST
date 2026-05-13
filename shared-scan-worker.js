@@ -1,4 +1,5 @@
-importScripts("scan.js");
+// Versioned import avoids stale SDK code when the hosted demo is redeployed.
+importScripts("scan.js?v=20260513-edge-sharedworker-2");
 
 // The worker owns the only real WebFxScan instance for this browser origin.
 const scanInstance = new WebFxScan({ mode: "dev" });
@@ -37,6 +38,18 @@ function handlePortMessage(port, message) {
   // Remove closed tabs from the broadcast list.
   if (message.type === "disconnect") {
     ports.delete(port);
+    if (ports.size === 0) {
+      // When the last tab leaves, release WebScan2 so another browser/app can open the scanner.
+      closeConnection().catch((error) => {
+        console.warn("[SharedScanWorker] close after disconnect failed:", error);
+      });
+    }
+    return;
+  }
+
+  if (message.type === "client-ready") {
+    // Let the page know the worker loaded successfully before it sends scanner commands.
+    postToPort(port, { type: "ready" });
     return;
   }
 
