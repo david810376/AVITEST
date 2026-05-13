@@ -2,7 +2,7 @@
   let requestId = 0;
   // Bump this query string when deploying worker/SDK fixes so Edge does not reuse a stale SharedWorker script.
   const SHARED_SCAN_WORKER_URL =
-    "shared-scan-worker.js?v=20260513-edge-sharedworker-2";
+    "shared-scan-worker.js?v=20260513-edge-sharedworker-3";
   const SHARED_SCAN_WORKER_NAME = "webfxscan-shared-worker";
 
   // Page-side proxy for the SharedWorker-owned WebFxScan instance.
