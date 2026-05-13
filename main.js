@@ -1,27 +1,5 @@
 $(document).ready(function () {
   const isDebug = false;
-
-  /*** Shared Worker 初始化 ***/
-  let mySharedWorker;
-  if (window.SharedWorker) {
-    // 假設你的 worker 檔案叫 worker.js
-    mySharedWorker = new SharedWorker('worker.js');
-    
-    // 啟動通訊埠
-    mySharedWorker.port.start();
-
-    // 監聽來自 Worker 的消息 (例如同步其他分頁的掃描狀態)
-    mySharedWorker.port.onmessage = function (e) {
-      console.log('來自 Shared Worker 的同步訊息:', e.data);
-      // 如果你想在所有分頁同步顯示 log，可以在這裡呼叫 view.addLogEntry
-         view.addLogEntry(JSON.stringify({ SharedWorker: e.data }), "down");
-    };
-
-    console.log('Shared Worker 已連線');
-  } else {
-    console.warn('此瀏覽器不支援 Shared Worker');
-  }
-  
   /*** Events ***/
   // send scan command to server
   $("#scan").on("click", async function () {
@@ -36,14 +14,6 @@ $(document).ready(function () {
         });
         imageAction.updateTotal(data.length);
         imageAction.to(1);
-        // --- 新增：通知其他分頁掃描已完成 ---
-        if (mySharedWorker) {
-          mySharedWorker.port.postMessage({
-            type: 'SCAN_COMPLETED',
-            count: data.length,
-            time: new Date().toLocaleTimeString()
-          });
-        }
       } else {
         console.log(error);
       }
@@ -198,11 +168,18 @@ $(document).ready(function () {
   });
 
   // vtm 300 eject paper
-  $("#eject-back").on("click", async function (e) {
-    await MyScan.ejectPaper({ isBackward: true });
-  });
-  $("#eject-front").on("click", async function (e) {
-    await MyScan.ejectPaper({ isBackward: false });
+  $("#eject-paper").on("click", async function (e) {
+    const selectedValue = $("#eject-type").val();
+    // Convert string "true"/"false" to boolean, or keep string value for other options
+    let isBackward;
+    if (selectedValue === "true") {
+      isBackward = true;
+    } else if (selectedValue === "false") {
+      isBackward = false;
+    } else {
+      isBackward = selectedValue; // String values like "EJECT_FORWARDING", etc.
+    }
+    await MyScan.ejectPaper({ isBackward });
   });
 
   /*** Image proxy ***/
@@ -512,8 +489,14 @@ $(document).ready(function () {
         console.log(code, data);
       };
 
+      const ipExceptionCallback = (dataObj = {}) => {
+        const { func = "", type = "", data = {} } = dataObj;
+        const { message = "", notify_code } = data;
+        alert(message);
+      };
+
       // connect server
-      await MyScan.connect({ ip: "localhost", port: "17778", eventCallback });
+      await MyScan.connect({ ip: "localhost", port: "17778", eventCallback, ipExceptionCallback });
       await MyScan.setAutoScanCallback({
         callback: (file, errCode) => {
           if (errCode === 0) {
@@ -642,7 +625,8 @@ $(document).ready(function () {
   }
 
   /*** Main ***/
-  const MyScan = new WebFxScan({mode:"dev"});
+  // Use the SharedWorker-backed client so tabs in the same browser share one WebSocket/scanner session.
+  const MyScan = createWebFxScanClient({ mode: "dev" });
   wrapLib(MyScan);
   init();
 });

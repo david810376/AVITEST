@@ -599,7 +599,7 @@ class WebFxScanServer {
     this.state.mode = mode;
   }
 
-  version = "1.1.10.25405";
+  version = "1.1.10.26064";
   state = {
     socket: null,
     ip: "",
@@ -982,11 +982,13 @@ class WebFxScanServer {
   async connect(props) {
     const self = this;
     const {
-      ip = "127.0.0.1",
+      // WebScan2 listens on localhost for WSS; avoid 127.0.0.1 because it may only bind to IPv6 ::1.
+      ip = "localhost",
       port = "17778",
       errorCallback,
       closeCallback,
       eventCallback,
+      ipExceptionCallback,
     } = props;
 
     return new Promise((resolve, reject) => {
@@ -1014,6 +1016,7 @@ class WebFxScanServer {
       let socket;
 
       try {
+        // LibWebFxScan.ini uses WSS=1, so the client must connect with wss://.
         self.state.socket = new WebSocket(
           "wss://" + ip + ":" + port + "/webscan2"
         );
@@ -1116,6 +1119,10 @@ class WebFxScanServer {
           // trigger event callback if provided
           if (typeof eventCallback === "function" && event_code !== null) {
             eventCallback(event_code, fixData);
+          }
+
+          if (type === "callback" && func === "LIBWFX_NOTIFY_EXCEPTION") {
+            ipExceptionCallback(fixData);
           }
 
           // map apiList then excute callback
@@ -2538,23 +2545,19 @@ class WebFxScan {
       port = "",
       errorCallback = () => {},
       closeCallback = () => {},
-      eventCallback = null,
+      eventCallback = () => {},
+      ipExceptionCallback = () => {},
     } = props;
     if (
       typeof errorCallback !== "function" ||
-      typeof closeCallback !== "function"
+      typeof closeCallback !== "function" ||
+      typeof eventCallback !== "function" ||
+      typeof ipExceptionCallback !== "function"
     ) {
       WebFxScanUtility.throwError({
         errCode: 9010,
         message:
-          "errorCallback or closeCallback is not function. It require function type.",
-      });
-    }
-    if (eventCallback !== null && typeof eventCallback !== "function") {
-      WebFxScanUtility.throwError({
-        errCode: 9010,
-        message:
-          "eventCallback is not function. It require function type or null.",
+          "errorCallback or closeCallback or eventCallback or ipExceptionCallback is not function. It require function type.",
       });
     }
     if (typeof ip !== "string" || typeof port !== "string") {
@@ -2570,6 +2573,7 @@ class WebFxScan {
       errorCallback,
       closeCallback,
       eventCallback,
+      ipExceptionCallback,
     });
   }
 
@@ -2677,11 +2681,19 @@ class WebFxScan {
 
   ejectPaper(props) {
     const { isBackward = false } = props;
-    if (typeof isBackward !== "boolean") {
+    if (typeof isBackward !== "boolean" && typeof isBackward !== "string") {
       WebFxScanUtility.throwError({
         errCode: 9010,
-        message: "isBackward is not boolean. It require boolean type.",
+        message: "isBackward is not valid parameter. It require boolean or string type.",
       });
+    }
+    if (typeof isBackward === "string") {
+      if (isBackward !== "EJECT_FORWARDING" && isBackward !== "EJECT_BACKWARDING" && isBackward !== "EJECT_BACKWARDINGS" && isBackward !== "EJECT_FORWARDINGS" && isBackward !== "EJECT_FORWARDING_BY_STEPS" && isBackward !== "EJECT_BACKWARDING_BY_STEPS" && isBackward !== "EJECT_FORWARDING_FORCE" && isBackward !== "EJECT_BACKWARDING_FORCE" && isBackward !== "EJECT_BACKWARDINGS_FORCE" && isBackward !== "EJECT_FORWARDINGS_FORCE") {
+        WebFxScanUtility.throwError({
+          errCode: 9010,
+          message: "isBackward is not valid parameter. It require EJECT_FORWARDING, EJECT_BACKWARDING, EJECT_BACKWARDINGS or EJECT_FORWARDINGS type.",
+        });
+      }
     }
     return this.serverInstance.ejectPaper({ isBackward });
   }
@@ -2689,6 +2701,11 @@ class WebFxScan {
   getPaperStatus() {
     return this.serverInstance.getPaperStatus();
   }
+}
+
+// Expose the SDK class to both window and SharedWorker scopes.
+if (typeof self !== "undefined") {
+  self.WebFxScan = WebFxScan;
 }
 
 if (typeof exports !== "undefined" && typeof module !== "undefined") {

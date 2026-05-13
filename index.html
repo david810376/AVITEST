@@ -8,6 +8,8 @@
     <script src="jquery.3.6.4.js"></script>
     <script src="jquery.json-viewer.js"></script>
     <script src="scan.js"></script>
+    <!-- SharedWorker client must load after scan.js and before main.js so main.js can use createWebFxScanClient(). -->
+    <script src="shared-scan-client.js"></script>
     <script src="main.js"></script>
     <link href="bootstrap.min.css" rel="stylesheet" />
     <link href="jquery.json-viewer.css" rel="stylesheet" />
@@ -89,24 +91,29 @@
               Scan
             </button>
             <!-- VTM 300 -->
-            <div class="d-flex mb-1 justify-content-between">
-              <label class="m-0 align-self-center fw-bold form-label"
-                >VTM300 Eject Paper</label
+            <div class="d-flex flex-column mb-3 justify-content-between">
+              <label class="m-0 align-self-start fw-bold form-label"
+                >VTM Eject Paper</label
               >
               <div class="d-flex gap-2">
+                <select class="form-select" id="eject-type">
+                  <option value="EJECT_BACKWARDING_FORCE">backwarding - force</option>
+                  <option value="EJECT_FORWARDING_FORCE">forwarding - force</option>
+                  <option value="EJECT_BACKWARDINGS_FORCE">backwarding stop - force</option>
+                  <option value="EJECT_FORWARDINGS_FORCE">forwarding stop - force</option>
+                  <option value="EJECT_BACKWARDING">backwarding</option>
+                  <option value="EJECT_FORWARDING">forwarding</option>
+                  <option value="EJECT_BACKWARDINGS">backwarding stop</option>
+                  <option value="EJECT_FORWARDINGS">forwarding stop</option>
+                  <option value="EJECT_BACKWARDING_BY_STEPS">backwarding by steps</option>
+                  <option value="EJECT_FORWARDING_BY_STEPS">forwarding by steps</option>
+                </select>
                 <button
-                  id="eject-back"
+                  id="eject-paper"
                   type="button"
                   class="custom-button-scan text-white fw-bold btn"
                 >
-                  Back
-                </button>
-                <button
-                  id="eject-front"
-                  type="button"
-                  class="custom-button-scan text-white fw-bold btn"
-                >
-                  Front
+                  Eject
                 </button>
               </div>
             </div>
