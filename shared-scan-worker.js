@@ -1,9 +1,13 @@
 // Versioned import avoids stale SDK code when the hosted demo is redeployed.
-importScripts("scan.js?v=20260513-edge-sharedworker-3");
+importScripts("scan.js?v=20260513-edge-sharedworker-6");
 
 // The worker owns the only real WebFxScan instance for this browser origin.
+const WORKER_VERSION = "20260513-edge-sharedworker-6";
+const workerId = createDebugId("worker");
 const scanInstance = new WebFxScan({ mode: "dev" });
 const ports = new Set();
+const portIds = new Map();
+let nextPortId = 0;
 
 // Serialize scanner commands because WebScan2 rejects overlapping API calls.
 let requestQueue = Promise.resolve();
@@ -11,6 +15,7 @@ let connectState = "idle";
 let connectPromise = null;
 let initialized = false;
 let initResult = null;
+let deviceListResult = null;
 
 // Cache the last scanner setup so a second tab does not re-open the same device.
 let scannerConfigKey = null;
@@ -23,7 +28,10 @@ let socketMsgCollectorEnabled = false;
 
 self.onconnect = function (event) {
   const port = event.ports[0];
+  const portId = ++nextPortId;
   ports.add(port);
+  portIds.set(port, portId);
+  broadcastDebug("connect-port", getWorkerState({ portId }));
 
   port.onmessage = function (messageEvent) {
     handlePortMessage(port, messageEvent.data);
@@ -37,11 +45,19 @@ function handlePortMessage(port, message) {
 
   // Remove closed tabs from the broadcast list.
   if (message.type === "disconnect") {
+    const portId = getPortId(port);
     ports.delete(port);
+    portIds.delete(port);
+    broadcastDebug("disconnect-port", getWorkerState({ portId }));
     if (ports.size === 0) {
       // When the last tab leaves, release WebScan2 so another browser/app can open the scanner.
+      broadcastDebug("close-last-port", getWorkerState({ portId }));
       closeConnection().catch((error) => {
         console.warn("[SharedScanWorker] close after disconnect failed:", error);
+        broadcastDebug("close-last-port-error", {
+          ...getWorkerState({ portId }),
+          error: serializeError(error),
+        });
       });
     }
     return;
@@ -49,13 +65,31 @@ function handlePortMessage(port, message) {
 
   if (message.type === "client-ready") {
     // Let the page know the worker loaded successfully before it sends scanner commands.
-    postToPort(port, { type: "ready" });
+    const portId = getPortId(port);
+    const readyState = getWorkerState({
+      portId,
+      clientId: message.clientId || "",
+      href: message.href || "",
+    });
+    broadcastDebug("client-ready", readyState);
+    postToPort(port, { type: "ready", data: readyState });
     return;
   }
 
   if (message.type !== "request") return;
 
   const { id, method, args = {} } = message;
+  const portId = getPortId(port);
+  broadcastDebug(
+    "request-start",
+    getWorkerState({
+      portId,
+      clientId: message.clientId || "",
+      id,
+      method,
+      args: summarizeForLog(args),
+    })
+  );
   // Callback registration and version reads do not touch the scanner command queue.
   const run = isImmediateMethod(method)
     ? executeMethod(port, method, args)
@@ -63,19 +97,42 @@ function handlePortMessage(port, message) {
 
   Promise.resolve(run)
     .then((result) => {
+      broadcastDebug(
+        "request-ok",
+        getWorkerState({
+          portId,
+          clientId: message.clientId || "",
+          id,
+          method,
+          result: summarizeForLog(result),
+        })
+      );
       postToPort(port, {
         type: "response",
         id,
+        method,
         ok: true,
         result,
       });
     })
     .catch((error) => {
+      const serializedError = serializeError(error);
+      broadcastDebug(
+        "request-error",
+        getWorkerState({
+          portId,
+          clientId: message.clientId || "",
+          id,
+          method,
+          error: serializedError,
+        })
+      );
       postToPort(port, {
         type: "response",
         id,
+        method,
         ok: false,
-        error: serializeError(error),
+        error: serializedError,
       });
     });
 }
@@ -107,7 +164,7 @@ async function executeMethod(port, method, args) {
     case "getVersion":
       return scanInstance.getVersion();
     case "getDeviceList":
-      return scanInstance.getDeviceList();
+      return getDeviceListOnce();
     case "getFileList":
       return scanInstance.getFileList();
     case "setScanner":
@@ -177,6 +234,9 @@ function connectOnce(args = {}) {
         connectState = "idle";
         initialized = false;
         initResult = null;
+        deviceListResult = null;
+        scannerConfigKey = null;
+        scannerConfigResult = null;
         broadcastEvent("connectError", { event: serializeSocketEvent(event) });
       },
       closeCallback: (event) => {
@@ -184,6 +244,9 @@ function connectOnce(args = {}) {
         connectState = "idle";
         initialized = false;
         initResult = null;
+        deviceListResult = null;
+        scannerConfigKey = null;
+        scannerConfigResult = null;
         broadcastEvent("close", { event: serializeSocketEvent(event) });
       },
       eventCallback: (code, data) => {
@@ -210,8 +273,10 @@ function connectOnce(args = {}) {
 
 async function closeConnection() {
   // Closing the shared socket clears all state owned by this worker.
+  broadcastDebug("close-connection", getWorkerState({}));
   initialized = false;
   initResult = null;
+  deviceListResult = null;
   scannerConfigKey = null;
   scannerConfigResult = null;
   connectState = "idle";
@@ -221,12 +286,14 @@ async function closeConnection() {
 async function initOnce() {
   // LibWFX_Init only needs to run once per shared socket.
   if (initialized && initResult) {
+    broadcastDebug("init-cache-hit", getWorkerState({ result: initResult }));
     return initResult;
   }
 
   try {
     initResult = await scanInstance.init();
     initialized = true;
+    broadcastDebug("init-ok", getWorkerState({ result: initResult }));
     return initResult;
   } catch (error) {
     // WebScan2 can report 1014 when another tab already initialized the shared service.
@@ -236,9 +303,51 @@ async function initOnce() {
         alreadyInitialized: true,
         originalError: getErrorCode(error),
       });
+      broadcastDebug("init-occupied-treated-as-ok", {
+        ...getWorkerState({ result: initResult }),
+        error: serializeError(error),
+      });
       return initResult;
     }
 
+    broadcastDebug("init-error", {
+      ...getWorkerState({}),
+      error: serializeError(error),
+    });
+    throw error;
+  }
+}
+
+async function getDeviceListOnce() {
+  // Device options are the same for every tab in this shared browser session.
+  if (deviceListResult) {
+    broadcastDebug(
+      "get-device-list-cache-hit",
+      getWorkerState({ result: summarizeForLog(deviceListResult) })
+    );
+    return deviceListResult;
+  }
+
+  try {
+    deviceListResult = await scanInstance.getDeviceList();
+    broadcastDebug(
+      "get-device-list-ok",
+      getWorkerState({ result: summarizeForLog(deviceListResult) })
+    );
+    return deviceListResult;
+  } catch (error) {
+    if (isServerOccupiedError(error) && deviceListResult) {
+      broadcastDebug("get-device-list-occupied-cache-hit", {
+        ...getWorkerState({ result: summarizeForLog(deviceListResult) }),
+        error: serializeError(error),
+      });
+      return deviceListResult;
+    }
+
+    broadcastDebug("get-device-list-error", {
+      ...getWorkerState({}),
+      error: serializeError(error),
+    });
     throw error;
   }
 }
@@ -248,6 +357,10 @@ async function setScannerOnce(args = {}) {
   const nextConfigKey = stableStringify(args);
 
   if (scannerConfigKey === nextConfigKey && scannerConfigResult) {
+    broadcastDebug(
+      "set-scanner-cache-hit",
+      getWorkerState({ scannerConfigKey })
+    );
     return successResponse({ alreadyConfigured: true });
   }
 
@@ -256,6 +369,10 @@ async function setScannerOnce(args = {}) {
     // Save successful configuration for later tabs with the same scanner settings.
     scannerConfigKey = nextConfigKey;
     scannerConfigResult = result;
+    broadcastDebug(
+      "set-scanner-ok",
+      getWorkerState({ scannerConfigKey, result: summarizeForLog(result) })
+    );
     return result;
   } catch (error) {
     // WebScan2 can return 1014 when the same scanner is already open.
@@ -265,9 +382,17 @@ async function setScannerOnce(args = {}) {
         alreadyConfigured: true,
         originalError: getErrorCode(error),
       });
+      broadcastDebug("set-scanner-occupied-treated-as-ok", {
+        ...getWorkerState({ scannerConfigKey, result: scannerConfigResult }),
+        error: serializeError(error),
+      });
       return scannerConfigResult;
     }
 
+    broadcastDebug("set-scanner-error", {
+      ...getWorkerState({ scannerConfigKey }),
+      error: serializeError(error),
+    });
     throw error;
   }
 }
@@ -375,6 +500,85 @@ function postToPort(port, message) {
   } catch (error) {
     console.warn("[SharedScanWorker] postMessage failed:", error);
   }
+}
+
+function broadcastDebug(eventName, data = {}) {
+  // Send worker diagnostics to page consoles so remote users can copy one log stream.
+  const message = {
+    type: "debug",
+    event: eventName,
+    data: {
+      time: new Date().toISOString(),
+      workerId,
+      version: WORKER_VERSION,
+      ...data,
+    },
+  };
+
+  ports.forEach((port) => {
+    postToPort(port, message);
+  });
+}
+
+function getWorkerState(extra = {}) {
+  return {
+    portCount: ports.size,
+    connectState,
+    initialized,
+    hasInitResult: Boolean(initResult),
+    hasScannerConfig: Boolean(scannerConfigKey),
+    socketReadyState: getSocketReadyState(),
+    ...extra,
+  };
+}
+
+function getSocketReadyState() {
+  const socket = scanInstance?.serverInstance?.state?.socket;
+  if (!socket) return "none";
+
+  switch (socket.readyState) {
+    case WebSocket.CONNECTING:
+      return "CONNECTING";
+    case WebSocket.OPEN:
+      return "OPEN";
+    case WebSocket.CLOSING:
+      return "CLOSING";
+    case WebSocket.CLOSED:
+      return "CLOSED";
+    default:
+      return String(socket.readyState);
+  }
+}
+
+function getPortId(port) {
+  return portIds.get(port) || 0;
+}
+
+function createDebugId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+function summarizeForLog(value) {
+  // Avoid logging scanned image/base64 payloads while still showing which API/config was used.
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return { type: "array", length: value.length };
+
+  const result = {};
+  Object.keys(value).forEach((key) => {
+    const currentValue = value[key];
+    if (key.toLowerCase().includes("base64")) {
+      result[key] = "[base64 omitted]";
+    } else if (typeof currentValue === "string" && currentValue.length > 120) {
+      result[key] = currentValue.slice(0, 120) + "...";
+    } else if (currentValue && typeof currentValue === "object") {
+      result[key] = summarizeForLog(currentValue);
+    } else {
+      result[key] = currentValue;
+    }
+  });
+  return result;
 }
 
 function serializeSocketEvent(event) {
