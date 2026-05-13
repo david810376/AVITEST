@@ -20,7 +20,6 @@ function Fail($Message) {
 
 $webScanExe = Join-Path $InstallDir "WebScan2.exe"
 $iniPath = Join-Path $InstallDir "LibWebFxScan.ini"
-$pfxPath = Join-Path $InstallDir "Davetest.pfx"
 
 Write-Step "Checking WebFXScan2 files"
 if (!(Test-Path -LiteralPath $webScanExe)) {
@@ -29,12 +28,25 @@ if (!(Test-Path -LiteralPath $webScanExe)) {
 if (!(Test-Path -LiteralPath $iniPath)) {
   Fail "LibWebFxScan.ini was not found at $iniPath"
 }
-if (!(Test-Path -LiteralPath $pfxPath)) {
-  Fail "Davetest.pfx was not found at $pfxPath"
-}
 
 $ini = Get-Content -LiteralPath $iniPath -Raw
 Write-Host $ini
+
+$certificateMatch = [regex]::Match($ini, "(?m)^\s*Certificate\s*=\s*(.+?)\s*$")
+if (!$certificateMatch.Success) {
+  Fail "LibWebFxScan.ini does not contain a Certificate= setting."
+}
+
+$certificateName = $certificateMatch.Groups[1].Value.Trim().Trim('"')
+$pfxPath = if ([System.IO.Path]::IsPathRooted($certificateName)) {
+  $certificateName
+} else {
+  Join-Path $InstallDir $certificateName
+}
+
+if (!(Test-Path -LiteralPath $pfxPath)) {
+  Fail "The certificate file from LibWebFxScan.ini was not found: $pfxPath"
+}
 
 if ($ini -notmatch "(?m)^\s*Port\s*=\s*17778\s*$") {
   Write-Warning "LibWebFxScan.ini does not show Port = 17778."
@@ -42,9 +54,7 @@ if ($ini -notmatch "(?m)^\s*Port\s*=\s*17778\s*$") {
 if ($ini -notmatch "(?m)^\s*WSS\s*=\s*1\s*$") {
   Write-Warning "LibWebFxScan.ini does not show WSS=1. The browser code expects wss://."
 }
-if ($ini -notmatch "(?m)^\s*Certificate\s*=\s*Davetest\.pfx\s*$") {
-  Write-Warning "LibWebFxScan.ini does not show Certificate=Davetest.pfx."
-}
+Write-Host "Certificate file: $pfxPath"
 
 Write-Step "Importing WebScan2 certificate into CurrentUser trusted roots"
 $securePassword = ConvertTo-SecureString $PfxPassword -AsPlainText -Force
