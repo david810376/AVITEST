@@ -2,7 +2,7 @@
   let requestId = 0;
   // Bump this query string when deploying worker/SDK fixes so Edge does not reuse a stale SharedWorker script.
   const SHARED_SCAN_WORKER_URL =
-    "shared-scan-worker.js?v=20260513-edge-sharedworker-9";
+    "shared-scan-worker.js?v=20260513-edge-sharedworker-10";
   const SHARED_SCAN_WORKER_NAME = "webfxscan-shared-worker";
   const DEBUG_LOG_LIMIT = 200;
 
@@ -444,16 +444,21 @@
           message: error && error.message ? error.message : String(error),
         });
 
-        throw {
-          result: false,
-          message: isTimeout
-            ? "Local Network Access permission was not granted within 30 seconds. Please allow this site to access localhost and try again."
-            : "Local Network Access warm-up failed. Please open https://localhost:17778/ in this Edge profile, trust the certificate, allow local network access, and try again.",
-          error: 9007,
-          data: {
-            localNetworkAccess: isTimeout ? "timeout" : "failed",
-          },
-        };
+        if (isTimeout) {
+          throw {
+            result: false,
+            message:
+              "Local Network Access permission was not granted within 30 seconds. Please allow this site to access localhost and try again.",
+            error: 9007,
+            data: {
+              localNetworkAccess: "timeout",
+            },
+          };
+        }
+
+        // Some WebScan2 builds return a network-level failure for fetch even though WSS can still open.
+        // Continue to the page WebSocket preflight so we can separate fetch/LNA prompt failure from WSS failure.
+        return runPageWebSocketPreflight(client, ip, port, releaseDelayMs);
       });
   }
 
